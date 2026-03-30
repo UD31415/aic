@@ -95,7 +95,7 @@ class DataCollector(Policy):
     SETTLE_TIME_S: float = 0.5
 
     # Root folder for saved images; scene sub-directories are created inside it
-    DATA_ROOT: str = "data"
+    DATA_ROOT: str = "/home/administrato/dev/ws_aic/data"
 
     # Cartesian admittance controller gains (same defaults as Policy.set_pose_target)
     STIFFNESS: list = [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]  # N/m and N·m/rad

@@ -50,7 +50,6 @@ cmake = "<4"
 # Workspace dependencies
 eigen = "*"
 libopencv = "*"
-numpy = "*"
 py-opencv = "*"
 ros-kilted-ament-cmake = "*"
 ros-kilted-ament-cmake-ros = "*"
