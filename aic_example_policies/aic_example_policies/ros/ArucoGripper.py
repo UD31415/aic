@@ -29,12 +29,13 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 
-from geometry_msgs.msg import Point, Pose, Quaternion
+from geometry_msgs.msg import Point, Pose, Quaternion, Transform
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
 from tf2_ros import TransformException
 from transforms3d.quaternions import mat2quat, qmult, quat2mat
+from transforms3d._gohlketransforms import quaternion_multiply, quaternion_slerp
 
 from aic_model.policy import (
     GetObservationCallback,
@@ -163,7 +164,7 @@ class ArucoGripper(Policy):
     # Coordinate transform: camera frame → base_link
     # ------------------------------------------------------------------
 
-    def _to_base_frame(self, pose_cam: Pose) -> Pose | None:
+    def to_base_frame(self, pose_cam: Pose) -> Pose | None:
         """
         Transform pose_cam (in CAMERA_FRAME) to base_link via TF2.
         Also adds APPROACH_Z_OFFSET along world-Z so the gripper hovers
@@ -219,6 +220,167 @@ class ArucoGripper(Policy):
         )
 
     # ------------------------------------------------------------------
+    # Code for detection and insertion
+    # ------------------------------------------------------------------ 
+
+    def calc_gripper_pose(
+        self,
+        port_transform: Transform,
+        slerp_fraction: float = 1.0,
+        position_fraction: float = 1.0,
+        z_offset: float = 0.1,
+        reset_xy_integrator: bool = False,
+    ) -> Pose:
+        """Find the gripper pose that results in plug alignment."""
+        q_port = (
+            port_transform.rotation.w,
+            port_transform.rotation.x,
+            port_transform.rotation.y,
+            port_transform.rotation.z,
+        )
+        plug_tf_stamped = self._parent_node._tf_buffer.lookup_transform(
+            "base_link",
+            f"{self._task.cable_name}/{self._task.plug_name}_link",
+            Time(),
+        )
+        q_plug = (
+            plug_tf_stamped.transform.rotation.w,
+            plug_tf_stamped.transform.rotation.x,
+            plug_tf_stamped.transform.rotation.y,
+            plug_tf_stamped.transform.rotation.z,
+        )
+        q_plug_inv = (
+            -q_plug[0],
+            q_plug[1],
+            q_plug[2],
+            q_plug[3],
+        )
+        q_diff = quaternion_multiply(q_port, q_plug_inv)
+        gripper_tf_stamped = self._parent_node._tf_buffer.lookup_transform(
+            "base_link",
+            "gripper/tcp",
+            Time(),
+        )
+        q_gripper = (
+            gripper_tf_stamped.transform.rotation.w,
+            gripper_tf_stamped.transform.rotation.x,
+            gripper_tf_stamped.transform.rotation.y,
+            gripper_tf_stamped.transform.rotation.z,
+        )
+        q_gripper_target = quaternion_multiply(q_diff, q_gripper)
+        q_gripper_slerp = quaternion_slerp(q_gripper, q_gripper_target, slerp_fraction)
+
+        gripper_xyz = (
+            gripper_tf_stamped.transform.translation.x,
+            gripper_tf_stamped.transform.translation.y,
+            gripper_tf_stamped.transform.translation.z,
+        )
+        port_xy = (
+            port_transform.translation.x,
+            port_transform.translation.y,
+        )
+        plug_xyz = (
+            plug_tf_stamped.transform.translation.x,
+            plug_tf_stamped.transform.translation.y,
+            plug_tf_stamped.transform.translation.z,
+        )
+        plug_tip_gripper_offset = (
+            gripper_xyz[0] - plug_xyz[0],
+            gripper_xyz[1] - plug_xyz[1],
+            gripper_xyz[2] - plug_xyz[2],
+        )
+
+        tip_x_error = port_xy[0] - plug_xyz[0]
+        tip_y_error = port_xy[1] - plug_xyz[1]
+
+        if reset_xy_integrator:
+            self._tip_x_error_integrator = 0.0
+            self._tip_y_error_integrator = 0.0
+        else:
+            self._tip_x_error_integrator = np.clip(
+                self._tip_x_error_integrator + tip_x_error,
+                -self._max_integrator_windup,
+                self._max_integrator_windup,
+            )
+            self._tip_y_error_integrator = np.clip(
+                self._tip_y_error_integrator + tip_y_error,
+                -self._max_integrator_windup,
+                self._max_integrator_windup,
+            )
+
+        self.get_logger().info(
+            f"pfrac: {position_fraction:.3} xy_error: {tip_x_error:0.3} {tip_y_error:0.3}   integrators: {self._tip_x_error_integrator:.3} , {self._tip_y_error_integrator:.3}"
+        )
+
+        i_gain = 0.15
+
+        target_x = port_xy[0] + i_gain * self._tip_x_error_integrator
+        target_y = port_xy[1] + i_gain * self._tip_y_error_integrator
+        target_z = port_transform.translation.z + z_offset - plug_tip_gripper_offset[2]
+
+        blend_xyz = (
+            position_fraction * target_x + (1.0 - position_fraction) * gripper_xyz[0],
+            position_fraction * target_y + (1.0 - position_fraction) * gripper_xyz[1],
+            position_fraction * target_z + (1.0 - position_fraction) * gripper_xyz[2],
+        )
+
+        return Pose(
+            position=Point(
+                x=blend_xyz[0],
+                y=blend_xyz[1],
+                z=blend_xyz[2],
+            ),
+            orientation=Quaternion(
+                w=q_gripper_slerp[0],
+                x=q_gripper_slerp[1],
+                y=q_gripper_slerp[2],
+                z=q_gripper_slerp[3],
+            ),
+        )
+    
+    # Gripper and Arm motion to specific coordinate
+    def gripper_move(self, move_robot, object_pose):
+
+        #port_transform = port_tf_stamped.transform
+
+        z_offset = 0.2
+
+        # Over five seconds, smoothly interpolate from the current position to
+        # a position above the port.
+        for t in range(0, 100):
+            interp_fraction = t / 100.0
+            try:
+                self.set_pose_target(
+                    move_robot=move_robot,
+                    pose=self.calc_gripper_pose(
+                        object_pose, #port_transform,
+                        slerp_fraction=interp_fraction,
+                        position_fraction=interp_fraction,
+                        z_offset=z_offset,
+                        reset_xy_integrator=True,
+                    ),
+                )
+            except TransformException as ex:
+                self.get_logger().warn(f"TF lookup failed during interpolation: {ex}")
+            self.sleep_for(0.05)
+
+        # Descend until the cable is inserted into the port.
+        while True:
+            if z_offset < -0.015:
+                break
+
+            z_offset -= 0.0005
+            self.get_logger().info(f"z_offset: {z_offset:0.5}")
+            try:
+                self.set_pose_target(
+                    move_robot=move_robot,
+                    pose=self.calc_gripper_pose(object_pose, z_offset=z_offset),
+                )
+            except TransformException as ex:
+                self.get_logger().warn(f"TF lookup failed during insertion: {ex}")
+            self.sleep_for(0.05)
+
+    # ------------------------------------------------------------------
     # Policy entry point
     # ------------------------------------------------------------------
 
@@ -262,7 +424,7 @@ class ArucoGripper(Policy):
                 continue
 
             # Transform detected pose into the robot base frame
-            pose_base = self._to_base_frame(pose_cam)
+            pose_base = self.to_base_frame(pose_cam)
             if pose_base is None:
                 self.sleep_for(sleep_s)
                 continue
