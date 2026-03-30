@@ -29,10 +29,14 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 
-from geometry_msgs.msg import Point, Pose, Quaternion, Transform
+from aic_control_interfaces.msg import MotionUpdate, TrajectoryGenerationMode
+from aic_model_interfaces.msg import Observation
+from aic_task_interfaces.msg import Task
+from geometry_msgs.msg import Point, Pose, Quaternion, Transform, Vector3, Wrench
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import Header
 from tf2_ros import TransformException
 from transforms3d.quaternions import mat2quat, qmult, quat2mat
 from transforms3d._gohlketransforms import quaternion_multiply, quaternion_slerp
@@ -43,8 +47,6 @@ from aic_model.policy import (
     Policy,
     SendFeedbackCallback,
 )
-from aic_model_interfaces.msg import Observation
-from aic_task_interfaces.msg import Task
 
 
 class ArucoGripper(Policy):
@@ -338,7 +340,65 @@ class ArucoGripper(Policy):
             ),
         )
     
+    # ------------------------------------------------------------------
+    # Gripper pose command (inlined from Policy.set_pose_target)
+    # ------------------------------------------------------------------
+
+    def _send_pose_to_gripper(
+        self,
+        move_robot: MoveRobotCallback,
+        pose: Pose,
+        frame_id: str = "base_link",
+    ) -> None:
+        """
+        Build a MotionUpdate and send it to the gripper.
+
+        This is the full implementation of Policy.set_pose_target, inlined here
+        so all controller parameters are visible and tunable in one place.
+
+        Parameters
+        ----------
+        pose        : target Pose for the gripper TCP (tool control point)
+        frame_id    : coordinate frame that pose is expressed in
+        stiffness   : diagonal of the 6-DOF Cartesian stiffness matrix
+                      [x, y, z, rx, ry, rz] in N/m and N·m/rad
+        damping     : diagonal of the 6-DOF Cartesian damping matrix
+        wrench_feedback_gains : how much force/torque feedback is mixed in
+                      (first 3 = forces, last 3 = torques)
+        """
+        stiffness = [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]   # N/m, N·m/rad
+        damping   = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]   # N·s/m, N·m·s/rad
+
+        motion_update = MotionUpdate(
+            header=Header(
+                frame_id=frame_id,
+                stamp=self._parent_node.get_clock().now().to_msg(),
+            ),
+            pose=pose,
+            # Stiffness and damping are 6×6 diagonal matrices, stored flat (36 values)
+            target_stiffness=np.diag(stiffness).flatten(),
+            target_damping=np.diag(damping).flatten(),
+            # No feedforward force/torque at the tip
+            feedforward_wrench_at_tip=Wrench(
+                force=Vector3(x=0.0, y=0.0, z=0.0),
+                torque=Vector3(x=0.0, y=0.0, z=0.0),
+            ),
+            # Mix in 50 % of measured force feedback on x/y/z, none on rotation
+            wrench_feedback_gains_at_tip=[0.5, 0.5, 0.5, 0.0, 0.0, 0.0],
+            # Track a position target (not a velocity target)
+            trajectory_generation_mode=TrajectoryGenerationMode(
+                mode=TrajectoryGenerationMode.MODE_POSITION,
+            ),
+        )
+        try:
+            move_robot(motion_update=motion_update)
+        except Exception as ex:
+            self.get_logger().info(f"move_robot exception: {ex}")
+
+    # ------------------------------------------------------------------
     # Gripper and Arm motion to specific coordinate
+    # ------------------------------------------------------------------
+
     def gripper_move(self, move_robot, object_pose):
 
         #port_transform = port_tf_stamped.transform
@@ -350,10 +410,10 @@ class ArucoGripper(Policy):
         for t in range(0, 100):
             interp_fraction = t / 100.0
             try:
-                self.set_pose_target(
+                self._send_pose_to_gripper(
                     move_robot=move_robot,
                     pose=self.calc_gripper_pose(
-                        object_pose, #port_transform,
+                        object_pose,
                         slerp_fraction=interp_fraction,
                         position_fraction=interp_fraction,
                         z_offset=z_offset,
@@ -372,7 +432,7 @@ class ArucoGripper(Policy):
             z_offset -= 0.0005
             self.get_logger().info(f"z_offset: {z_offset:0.5}")
             try:
-                self.set_pose_target(
+                self._send_pose_to_gripper(
                     move_robot=move_robot,
                     pose=self.calc_gripper_pose(object_pose, z_offset=z_offset),
                 )
@@ -437,8 +497,8 @@ class ArucoGripper(Policy):
             )
             send_feedback("ArUco marker found, moving gripper...")
 
-            # Send pose command to the gripper (uses MODE_POSITION, same as CheatCode)
-            self.set_pose_target(move_robot=move_robot, pose=pose_base)
+            # Send pose command to the gripper
+            self._send_pose_to_gripper(move_robot=move_robot, pose=pose_base)
             self.sleep_for(sleep_s)
 
         self.get_logger().info("ArucoGripper.insert_cable() done.")
