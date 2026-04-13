@@ -35,15 +35,18 @@ from rclpy.duration import Duration
 
 from datetime import datetime
 from pathlib import Path
-DATA_ROOT: str = "/home/administrato/dev/ws_aic/data"
+
 
 class WaveArm(Policy):
+
+    DATA_ROOT: str = "/home/administrato/dev/ws_aic/data"
+
     def __init__(self, parent_node):
         super().__init__(parent_node)
         self.get_logger().info("WaveArm.__init__()")
 
     @staticmethod
-    def _save_image(image_msg, path: Path) -> None:
+    def save_image(image_msg, path: Path) -> None:
         """Write a sensor_msgs/Image (RGB8) to a PNG file, converting RGB→BGR."""
         rgb = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
             image_msg.height, image_msg.width, 3
@@ -88,7 +91,22 @@ class WaveArm(Policy):
                 observation.center_image.header.stamp.sec
                 + observation.center_image.header.stamp.nanosec / 1e9
             )
-            self.get_logger().info(f"observation time: {t}")
+            self.get_logger().info(f"observation time - kuku: {t}")
+
+            # ---------------------------------------
+            # Save left / center / right images
+            prefix      = f"point_{idx:03d}"
+            left_name   = f"{scene_dir}\\{prefix}_left.png"
+            center_name = f"{scene_dir}\\{prefix}_center.png"
+            right_name  = f"{scene_dir}\\{prefix}_right.png"
+
+            self.save_image(observation.left_image,   left_name)
+            self.save_image(observation.center_image, center_name)
+            self.save_image(observation.right_image,  right_name)
+            self.get_logger().info(f"Saved image: {center_name}")
+
+            idx += 1
+            # ---------------------------------------            
 
             loop_seconds = 5.0
             loop_fraction = (t % loop_seconds) / loop_seconds
@@ -106,19 +124,7 @@ class WaveArm(Policy):
                 ),
             )
 
-            # ---------------------------------------
-            # Save left / center / right images
-            prefix = f"point_{idx:03d}"
-            left_name   = f"{prefix}_left.png"
-            center_name = f"{prefix}_center.png"
-            right_name  = f"{prefix}_right.png"
 
-            self._save_image(observation.left_image,   scene_dir / left_name)
-            self._save_image(observation.center_image, scene_dir / center_name)
-            self._save_image(observation.right_image,  scene_dir / right_name)
-
-            idx += 1
-            # ---------------------------------------
 
         self.get_logger().info("WaveArm.insert_cable() exiting...")
         return True

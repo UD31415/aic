@@ -183,6 +183,59 @@ Manages trial execution, validates participant models, and collects scoring data
 
 ---
 
+## UD
+# --------------------------
+#  AIC challenge
+python -m venv  /home/administrato/dev/envs/aic
+source /home/administrato/dev/envs/aic/bin/activate
+
+# installation steps: https://github.com/intrinsic-dev/aic/blob/main/docs/getting_started.md#setup-docker
+1, docker info - running
+2. dpkg -l | grep nvidia-container-toolkit : is installed
+3. config Docker:
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+4. Distrobox
+sudo apt install distrobox
+# if does not work do this
+curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh
+5. Pixi
+curl -fsSL https://pixi.sh/install.sh | sh
+# Restart your terminal after installation
+# if still do not work : 
+pixi global install pixi-ros 
+pixi ros init
+pixi install 
+
+# Evaluation container
+# Indicate distrobox to use Docker as container manager
+export DBX_CONTAINER_MANAGER=docker
+
+# Create and enter the eval container
+docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
+# If you do *not* have an NVIDIA GPU, remove the --nvidia flag for GPU support
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
+distrobox enter -r aic_eval
+
+# Inside the container, start the environment
+/entrypoint.sh ground_truth:=false start_aic_engine:=true
+
+# from other terminal run controler - working
+distrobox enter -r aic_eval
+cd ~/ws_aic/src/aic
+pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.WaveArm
+
+# cheat code : https://github.com/intrinsic-dev/aic/blob/main/aic_example_policies/README.md
+T1 : /entrypoint.sh ground_truth:=true start_aic_engine:=true
+T2 : pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.CheatCode
+
+# script from Claude
+./restart_sim.sh aic_example_policies.ros.WaveArm 
+
+# to update the file
+cp /home/administrato/dev/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/WaveArm.py \
+  /home/administrato/dev/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/WaveArm.py
+
 ## License
 
 This project is licensed under the Apache License 2.0 - see the individual package files for details.
