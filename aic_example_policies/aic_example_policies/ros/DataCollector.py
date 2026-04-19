@@ -48,6 +48,7 @@ from aic_task_interfaces.msg import Task
 from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from rclpy.node import Node
 from std_msgs.msg import Header
+from rclpy.duration import Duration
 
 from aic_model.policy import (
     GetObservationCallback,
@@ -136,6 +137,45 @@ class DataCollector(Policy):
                     orientation=Quaternion(w=w, x=qx, y=qy, z=qz),
                 ))
         return poses
+    
+    def wave_arm_scan_trajectory(self) -> list[Pose]:
+        """
+        Build a SCAN_GRID_N × SCAN_GRID_N boustrophedon (snake-row) grid.
+
+        Alternating rows are reversed so the TCP travels row-by-row without
+        jumping back to the row start, minimising total path length.
+
+        Returns a flat list of Poses, length = SCAN_GRID_N².
+        """
+        x_vals = -0.4 #np.linspace(self.SCAN_X_MIN, self.SCAN_X_MAX, self.SCAN_GRID_N)
+        y_vals = np.linspace(self.SCAN_Y_MIN, self.SCAN_Y_MAX, self.SCAN_GRID_N)
+        t_vals = np.linspace(0, 60, 180)
+        w, qx, qy, qz = 0,1.0,0,0, #self.SCAN_ORIENTATION
+        z_vals = 0.25
+        loop_seconds = 5.0
+        
+
+        poses = []
+        for row_idx, t_val in enumerate(t_vals):
+            # Reverse the Y direction on odd rows for the snake pattern
+            loop_fraction = (t_val % loop_seconds) / loop_seconds
+            y_scale = 2 * loop_fraction
+            if y_scale > 1.0:
+                y_scale = 2.0 - y_scale
+            y_scale -= 1.0  # y_scale will move linearly between [-1..1] and back.
+            y_vals = 0.45 + 0.3 * y_scale
+
+            #row_y = y_vals if row_idx % 2 == 0 else y_vals[::-1]
+
+            poses.append(Pose(
+                position=Point(
+                    x=float(x_vals),
+                    y=float(y_vals),
+                    z=float(z_vals),
+                ),
+                orientation=Quaternion(w=w, x=qx, y=qy, z=qz),
+            ))
+        return poses    
 
     # ------------------------------------------------------------------
     # Gripper pose command (inlined from Policy.set_pose_target)
@@ -235,13 +275,14 @@ class DataCollector(Policy):
         self.get_logger().info(f"DataCollector: saving scene to '{scene_dir}'")
 
         # --- Generate scan trajectory ---------------------------------------
-        trajectory = self._make_scan_trajectory()
-        total = len(trajectory)
-        self.get_logger().info(
-            f"DataCollector: {total}-point scan "
-            f"({self.SCAN_GRID_N}×{self.SCAN_GRID_N} grid, "
-            f"z={self.SCAN_Z:.2f} m)"
-        )
+        # #trajectory = self._make_scan_trajectory()
+        # trajectory = self.wave_arm_scan_trajectory()
+        # total = len(trajectory)
+        # self.get_logger().info(
+        #     f"DataCollector: {total}-point scan "
+        #     f"({self.SCAN_GRID_N}×{self.SCAN_GRID_N} grid, "
+        #     f"z={self.SCAN_Z:.2f} m)"
+        # )
 
         # --- Metadata to be written after the scan -------------------------
         metadata = {
@@ -270,20 +311,64 @@ class DataCollector(Policy):
         }
 
         # --- Main scan loop ------------------------------------------------
-        for idx, pose in enumerate(trajectory):
-            send_feedback(f"scanning {idx + 1}/{total}")
-            self.get_logger().info(
-                f"  [{idx + 1:3d}/{total}] → "
-                f"({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})"
+        # for idx, pose in enumerate(trajectory):
+        #     send_feedback(f"scanning {idx + 1}/{total}")
+        #     self.get_logger().info(
+        #         f"  [{idx + 1:3d}/{total}] → "
+        #         f"({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})"
+        #     )
+
+        #     # Command the gripper to this waypoint
+        #     #self._send_pose_to_gripper(move_robot=move_robot, pose=pose)
+
+        #     # Move the arm along a line, while looking down at the task board.
+        #     self.set_pose_target(
+        #         move_robot=move_robot,
+        #         pose=pose,
+        #     )            
+
+        #     # Wait for the robot to settle at the target position
+        #     self.sleep_for(self.SETTLE_TIME_S)
+
+        start_time = self.time_now()
+        idx = 0
+        timeout = Duration(seconds=10.0)
+        send_feedback("waving the arm around")
+        while (self.time_now() - start_time) < timeout:
+            self.sleep_for(0.25)
+            observation = get_observation()
+
+            if observation is None:
+                self.get_logger().info("No observation received.")
+                continue
+
+            t = (
+                observation.center_image.header.stamp.sec
+                + observation.center_image.header.stamp.nanosec / 1e9
             )
+            self.get_logger().info(f"observation time: {t}")
 
-            # Command the gripper to this waypoint
-            self._send_pose_to_gripper(move_robot=move_robot, pose=pose)
+            loop_seconds = 5.0
+            loop_fraction = (t % loop_seconds) / loop_seconds
+            y_scale = 2 * loop_fraction
+            if y_scale > 1.0:
+                y_scale = 2.0 - y_scale
+            y_scale -= 1.0  # y_scale will move linearly between [-1..1] and back.
 
-            # Wait for the robot to settle at the target position
-            self.sleep_for(self.SETTLE_TIME_S)
+            # Move the arm along a line, while looking down at the task board.
+            pose = Pose(
+                    position=Point(x=-0.4, y=0.45 + 0.3 * y_scale, z=0.25),
+                    orientation=Quaternion(x=1.0, y=0.0, z=0.0, w=0.0),
+                ),
+            self.set_pose_target(
+                move_robot=move_robot,
+                pose=pose,
+            )        
+        
+
 
             # Fetch the latest observation; retry briefly if not yet available
+            idx +=1
             obs = None
             for _ in range(10):
                 obs = get_observation()
